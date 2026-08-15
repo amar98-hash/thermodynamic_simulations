@@ -275,17 +275,16 @@ int main(int argc, char* argv[])
 
 
     const double Lx =
-        static_cast<double>(nx.v()) *
+        static_cast<double>(nx.v() - 1) *
         static_cast<double>(dx.v());
-
+    
     const double Ly =
-        static_cast<double>(ny.v()) *
+        static_cast<double>(ny.v() - 1) *
         static_cast<double>(dx.v());
-
+    
     const double Lz =
-        static_cast<double>(nz.v()) *
+        static_cast<double>(nz.v() - 1) *
         static_cast<double>(dx.v());
-
 
     // Validate future thermal-zone dimensions
     if (
@@ -855,7 +854,7 @@ int main(int argc, char* argv[])
     asl::SPLBGK lbgk(new asl::LBGK(block,acl::generateVEConstant(FlT(nuNum)), &asl::d3q15()));
 
 
-    auto heatSolver =generateFDAdvectionDiffusion(temperatureK,alphaNum,templ);
+    auto heatSolver =generateFDAdvectionDiffusion(temperatureK,alphaNum,advectionVelocity,templ);
     
  
     heatSolver->init();
@@ -863,7 +862,7 @@ int main(int argc, char* argv[])
 
     asl::SPLBGKUtilities lbgkUtil(new asl::LBGKUtilities(lbgk));
 
-    lbgkUtil->initF(acl::generateVEConstant(0.01,0.0, 0.0 ));
+    lbgkUtil->initF(acl::generateVEConstant(0.0,0.0, 0.0 ));
 
 
 
@@ -956,62 +955,6 @@ int main(int argc, char* argv[])
     //pipeNoSlipVel->execute();
 
 
-    auto& fluidContainer =
-    fluidMap->getContainer();
-
-    auto& lbVelocityContainer =
-        lbgk->getVelocity()->getContainer();
-
-    auto& advVelocityContainer =
-        advectionVelocity->getContainer();
-
-
-    auto fluidPtr =
-    acl::map<FlT>(
-        fluidContainer[0]
-    );
-
-
-    auto lbUx =
-    acl::map<FlT>(
-        lbVelocityContainer[0]
-    );
-
-    auto lbUy =
-        acl::map<FlT>(
-            lbVelocityContainer[1]
-        );
-
-    auto lbUz =
-        acl::map<FlT>(
-            lbVelocityContainer[2]
-        );
-
-    auto advUx =
-    acl::map<FlT>(
-        advVelocityContainer[0]
-    );
-
-    auto advUy =
-        acl::map<FlT>(
-            advVelocityContainer[1]
-        );
-
-    auto advUz =
-        acl::map<FlT>(
-            advVelocityContainer[2]
-        );
-
-
-    const auto& fullSize =
-    advectionVelocity->getBlock().getSize();
-
-    const size_t numberOfNodes =
-    static_cast<size_t>(fullSize[0]) *
-    static_cast<size_t>(fullSize[1]) *
-    static_cast<size_t>(fullSize[2]);
-
-
 
 
     std::cout
@@ -1101,47 +1044,225 @@ int main(int argc, char* argv[])
     //);
 
 
+
+    for (unsigned int i = 1; i <= 100; ++i)
+    {
+    // --------------------------------------------------------
+    // 1. Fluid step
+    // --------------------------------------------------------
+
+    lbgk->execute();
+
+    pipeNoSlipBC->execute();
+    outerNoSlipBC->execute();
+
+    pipeNoSlipVel->execute();
+
+
+    // --------------------------------------------------------
+    // 2. MASKING BLOCK
+    //    Copy u_LB -> u_adv only inside fluidMap
+    // --------------------------------------------------------
+
+    {
+        auto& fluidContainer =
+            fluidMap->getContainer();
+
+        auto& lbVelocityContainer =
+            lbgk->getVelocity()->getContainer();
+
+        auto& advVelocityContainer =
+            advectionVelocity->getContainer();
+
+
+        auto fluidPtr =
+            acl::map<FlT>(
+                fluidContainer[0]
+            );
+
+
+        auto lbUx =
+            acl::map<FlT>(
+                lbVelocityContainer[0]
+            );
+
+        auto lbUy =
+            acl::map<FlT>(
+                lbVelocityContainer[1]
+            );
+
+        auto lbUz =
+            acl::map<FlT>(
+                lbVelocityContainer[2]
+            );
+
+
+        auto advUx =
+            acl::map<FlT>(
+                advVelocityContainer[0]
+            );
+
+        auto advUy =
+            acl::map<FlT>(
+                advVelocityContainer[1]
+            );
+
+        auto advUz =
+            acl::map<FlT>(
+                advVelocityContainer[2]
+            );
+
+
+        const auto& fullSize =
+            advectionVelocity->getBlock().getSize();
+
+
+        const size_t numberOfNodes =
+            static_cast<size_t>(fullSize[0]) *
+            static_cast<size_t>(fullSize[1]) *
+            static_cast<size_t>(fullSize[2]);
+
+
+        for (size_t j = 0; j < numberOfNodes; ++j)
+        {
+            if (fluidPtr.get()[j] > 0.1f)
+            {
+                advUx.get()[j] = lbUx.get()[j];
+                advUy.get()[j] = lbUy.get()[j];
+                advUz.get()[j] = lbUz.get()[j];
+            }
+            else
+            {
+                advUx.get()[j] = 0.0f;
+                advUy.get()[j] = 0.0f;
+                advUz.get()[j] = 0.0f;
+            }
+        }
+    }
+
+
+    // --------------------------------------------------------
+    // 3. Temperature step
+    // --------------------------------------------------------
+
+    heatSolver->execute();
+
+    wallTemperatureBC->execute();
+
+
+    auto& TContainer =
+    temperatureK->getContainer();
+
+    auto& fluidContainer =
+        fluidMap->getContainer();
+    
+    auto Tptr =
+        acl::map<FlT>(
+            TContainer[0]
+        );
+    
+    auto fluidPtr =
+        acl::map<FlT>(
+            fluidContainer[0]
+        );
+
+
+    const auto& fullSize =
+    temperatureK->getBlock().getSize();
+
+    const size_t numberOfNodes =
+        static_cast<size_t>(fullSize[0]) *
+        static_cast<size_t>(fullSize[1]) *
+        static_cast<size_t>(fullSize[2]);
+
+
+    double sumInverseT = 0.0;
+    size_t fluidNodes = 0;
+
+
     for (size_t j = 0; j < numberOfNodes; ++j)
     {
-        if (fluidPtr.get()[j] > 0.1f)
-        {
-            advUx.get()[j] = lbUx.get()[j];
-            advUy.get()[j] = lbUy.get()[j];
-            advUz.get()[j] = lbUz.get()[j];
-        }
-        else
-        {
-            advUx.get()[j] = 0.0f;
-            advUy.get()[j] = 0.0f;
-            advUz.get()[j] = 0.0f;
-        }
-    }
-
-    for (unsigned int i = 1; i < 100; ++i)
+    if (fluidPtr.get()[j] > 0.1f)
     {
-        // Temperature
-        heatSolver->execute();
-        wallTemperatureBC->execute();
-    
-        // Fluid
-        lbgk->execute();
-        pipeNoSlipBC->execute();
-        outerNoSlipBC->execute();
+        const double T =
+            static_cast<double>(
+                Tptr.get()[j]
+            );
 
-
-        if (!(i % 10))
-        {
-            pipeNoSlipVel->execute();
-        
-            std::cout
-                << "Writing iteration "
-                << i
-                << std::endl;
-        
-            writer.write();
-        }
+        sumInverseT += 1.0 / T;
+        ++fluidNodes;
+    }
     }
 
+
+    const double meanInverseT =
+    sumInverseT /
+    static_cast<double>(fluidNodes);
+
+
+
+    const double pressureArNow =
+    pressurePa *
+    (1.0 / static_cast<double>(Tcold.v())) /
+    meanInverseT;
+
+    auto& nArContainer =
+    nAr->getContainer();
+
+    auto nArPtr =
+    acl::map<FlT>(
+        nArContainer[0]
+    );
+
+
+    for (size_t j = 0; j < numberOfNodes; ++j)
+    {
+    if (fluidPtr.get()[j] > 0.1f)
+    {
+        const double T =
+            static_cast<double>(
+                Tptr.get()[j]
+            );
+
+        const double nLocal =
+            pressureArNow /
+            (
+                kB * T
+            );
+
+        nArPtr.get()[j] =
+            static_cast<FlT>(
+                nLocal
+            );
+    }
+    else
+    {
+        nArPtr.get()[j] = 0.0f;
+    }
+    }
+    // --------------------------------------------------------
+    // 4. Output
+    // --------------------------------------------------------
+
+    if (!(i % 10))
+    {
+        pipeNoSlipVel->execute();
+
+        std::cout
+            << "Writing iteration "
+            << i
+            << std::endl;
+
+        std::cout
+        << "Iteration " << i
+        << "  P_Ar = "
+        << pressureArNow / torrToPa
+        << " Torr"
+        << std::endl;
+
+        writer.write();
+    }
+    }
 
 
 
