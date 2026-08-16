@@ -1,9 +1,9 @@
 include_directories(${CMAKE_SOURCE_DIR}/src)
 
-add_executable(heatpipe_init heatpipe_init.cc)
+add_executable(heatpipe heatpipe.cc)
 
 target_link_libraries(
-    heatpipe_init
+    heatpipe
     aslnum
     aslvtk
     asl
