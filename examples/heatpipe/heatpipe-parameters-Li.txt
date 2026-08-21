@@ -1,0 +1,11 @@
+L_arm_l  = 35 in + 2.5*2in
+
+s_arm_l  = 15.5 in
+
+L_arm_r  = 4.4 cm
+
+S_arm_r  = 2.0 cm
+
+L_arm_cl = 7.5 in
+
+S_arm_cl = 7.5 in

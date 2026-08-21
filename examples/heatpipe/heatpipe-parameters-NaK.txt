@@ -1,0 +1,14 @@
+xmin = -150.0
+xmax = 150.0
+ymin = -150.0
+ymax = 150.0
+zmin = -150.0
+zmax = 150.0
+
+xr=30.0
+yr=30.0
+zr=30.0
+
+xcold = 50.0
+ycold = 50.0
+zcold = 50.0
