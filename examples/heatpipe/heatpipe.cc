@@ -2,10 +2,13 @@
 #include <vector>
 #include <cmath>
 #include <iomanip>
+#include <chrono>
 
 #include <queue>
 #include <array>
 #include <algorithm>
+#include <limits>
+#include <stdexcept>
 
 
 #include <aslGeomInc.h>
@@ -48,9 +51,14 @@ constexpr double NA = 6.02214076e23;   // mol^-1
 const double torrToPa = 133.322368;
 
 //nesmeyanov parameters for Li
-constexpr double A1 = 4.98831; //cus C is used elsewhere.
-constexpr double B1 = 7918.984;
-constexpr double C1 = -9.52;
+//onstexpr double A1 = 4.98831; //cus C is used elsewhere.
+//onstexpr double B1 = 7918.984;
+//onstexpr double C1 = -9.52;
+
+constexpr double A1 = 10.34540;
+constexpr double B1 = 8345.574;
+constexpr double C1 = -0.00008840;
+constexpr double D1 = -0.68106;
 
 //declaraation of the temperature function
 struct WallTemperatureParameters
@@ -79,6 +87,36 @@ struct SourceSinkCache
     std::vector<SourceCell> sourceCells;
 };
 
+struct ConcentrationCubeResult
+{
+    double minCAr = 0.0;
+    double maxCAr = 0.0;
+    double averageCAr = 0.0;
+
+    double minCB = 0.0;
+    double maxCB = 0.0;
+    double averageCB = 0.0;
+
+    double deltaCAr = 0.0;
+    double deltaCB = 0.0;
+
+    double relativeChangeCAr = 0.0;
+    double relativeChangeCB = 0.0;
+
+    std::size_t gasCells = 0;
+
+    bool converged = false;
+};
+
+
+struct ConcentrationConvergenceState
+{
+    double previousAverageCAr = 0.0;
+    double previousAverageCB = 0.0;
+
+    bool initialized = false;
+};
+
 
 // Build once AFTER temperature reaches steady state
 SourceSinkCache buildSourceSinkCache(const asl::SPDataWithGhostNodesACLData& cB,
@@ -93,7 +131,7 @@ asl::SPDataWithGhostNodesACLData buildGasVolumeMap(const asl::SPDataWithGhostNod
 double calculatePeq(const asl::SPDataWithGhostNodesACLData& temperature,const asl::SPDataWithGhostNodesACLData& gasVolumeMap,double NAr);
 void updatePeqField(const asl::SPDataWithGhostNodesACLData& PeqField,const asl::SPDataWithGhostNodesACLData& gasVolumeMap,double Peq);
 double calculateTotalNAr(const asl::SPDataWithGhostNodesACLData& nAr,const asl::SPDataWithGhostNodesACLData& gasVolumeMap);
-double sampleVaporPressure(double T, const double A, const double B, const double C);
+double sampleVaporPressure(double T, const double A, const double B, const double C, const double D);
 void buildSourceMap(const asl::SPDataWithGhostNodesACLData& sourceMap,
     const asl::SPDataWithGhostNodesACLData& gasVolumeMap,
     double lengthZ,       // mm
@@ -132,10 +170,55 @@ void updatePressureFields(
     const asl::SPDataWithGhostNodesACLData& PAr,
     const asl::SPDataWithGhostNodesACLData& PB,
     const asl::SPDataWithGhostNodesACLData& Ptotal,
+    const asl::SPDataWithGhostNodesACLData& xAr,
+    const asl::SPDataWithGhostNodesACLData& xB,
+    const asl::SPDataWithGhostNodesACLData& gasVolumeMap,
+    double Pmix_Pa);
+
+double calculatePeqBinary(
+    const asl::SPDataWithGhostNodesACLData& temperature,
+    const asl::SPDataWithGhostNodesACLData& xAr,
+    const asl::SPDataWithGhostNodesACLData& gasVolumeMap,
+    double NAr);
+
+void copyField(
+    const asl::SPDataWithGhostNodesACLData& dst,
+    const asl::SPDataWithGhostNodesACLData& src);
+
+struct TemperatureCubeResult
+{
+    double minT;
+    double averageT;
+    std::size_t gasCells;
+    bool converged=false;
+};
+
+TemperatureCubeResult checkTemperatureCube(
+    const asl::SPDataWithGhostNodesACLData& temperature,
+    const asl::SPDataWithGhostNodesACLData& gasVolumeMap,
+    double centerX,
+    double centerY,
+    double centerZ,
+    double cubeLength_mm,
+    double operatingT_K,
+    double tolerance_K);
+
+
+ConcentrationCubeResult checkConcentrationCube(
     const asl::SPDataWithGhostNodesACLData& cAr,
     const asl::SPDataWithGhostNodesACLData& cB,
-    const asl::SPDataWithGhostNodesACLData& temperature,
-    const asl::SPDataWithGhostNodesACLData& gasVolumeMap);
+    const asl::SPDataWithGhostNodesACLData& gasVolumeMap,
+
+    double centerX,
+    double centerY,
+    double centerZ,
+
+    double cubeLength_mm,
+
+    double relativeTolerance,
+    double absoluteTolerance,
+
+    ConcentrationConvergenceState& state);
 
 typedef float FlT;
 
@@ -228,6 +311,7 @@ int main()
     std::cout<<"Now creating number density fields"<<std::endl;
     //density fields. B B2.. are names for generic samples. eg: Li, Li2 or NaK, Na, K, etc..
     auto nAr =asl::generateDataContainerACL_SP<double>(block,1,1u);
+    auto nArRef =asl::generateDataContainerACL_SP<double>( block,1,1u);
     auto nB  = asl::generateDataContainerACL_SP<double>(block, 1, 1u);
     auto nB2 = asl::generateDataContainerACL_SP<double>(block, 1, 1u);
 
@@ -244,8 +328,6 @@ int main()
     auto PArField =asl::generateDataContainerACL_SP<double>(block,1,1u);
     auto PBField =asl::generateDataContainerACL_SP<double>(block,1,1u);
     auto PtotalField =asl::generateDataContainerACL_SP<double>(block,1,1u);
-
-
    
     std::cout<<"Creating sample source map."<<std::endl;
     auto SourceMap =asl::generateDataContainerACL_SP<double>(block,1,1u);
@@ -258,6 +340,7 @@ int main()
     asl::initData(nB, 0.0);
     asl::initData(nB2, 0.0);
     asl::initData(nAr, 0.0);
+    asl::initData(nArRef, 0.0);
     asl::initData(cB, 0.0);
     asl::initData(cB2, 0.0);
     asl::initData(cAr, 0.0); //need to re-initialize cAr using Peq and T field at t=0.
@@ -275,21 +358,25 @@ int main()
     //-------------------------------
     //-------------------------------
 
-    auto coldZPlus  =asl::generateDFCylinder(zr+5.0,asl::makeAVec(zcold+5, 0.0, 0.0), asl::makeAVec(PosZ, 0.0, 0.0));   
+    auto coldZPlus  =asl::generateDFCylinder(zr+8.0,asl::makeAVec(zcold+5, 0.0, 0.0), asl::makeAVec(PosZ, 0.0, 0.0));   
     //auto coldZMinus =asl::generateDFCylinder(zr+1,asl::makeAVec(zcold+5, 0.0, 0.0),asl::makeAVec(-PosZ, 0.0, 0.0));
-    auto coldXPlus  =asl::generateDFCylinder(xr+5.0,asl::makeAVec(0.0, 0.0, xcold+5), asl::makeAVec(0.0, 0.0, PosX));
-    auto coldXMinus =asl::generateDFCylinder(xr+5.0,asl::makeAVec(0.0, 0.0, xcold+5),asl::makeAVec(0.0, 0.0, -PosX));
-    auto coldYPlus  =asl::generateDFCylinder(yr+5.0,asl::makeAVec(0.0, ycold+5, 0.0), asl::makeAVec(0.0,PosY, 0.0));    
-    auto coldYMinus =asl::generateDFCylinder(yr+5.0,asl::makeAVec(0.0, ycold+5, 0.0),asl::makeAVec(0.0,-PosY, 0.0));
+    auto coldXPlus  =asl::generateDFCylinder(xr+8.0,asl::makeAVec(0.0, 0.0, xcold+5), asl::makeAVec(0.0, 0.0, PosX));
+    auto coldXMinus =asl::generateDFCylinder(xr+8.0,asl::makeAVec(0.0, 0.0, xcold+5),asl::makeAVec(0.0, 0.0, -PosX));
+    auto coldYPlus  =asl::generateDFCylinder(yr+8.0,asl::makeAVec(0.0, ycold+5, 0.0), asl::makeAVec(0.0,PosY, 0.0));    
+    auto coldYMinus =asl::generateDFCylinder(yr+8.0,asl::makeAVec(0.0, ycold+5, 0.0),asl::makeAVec(0.0,-PosY, 0.0));
 
     //Turn stl discrete data into continuous distance function.
     auto cavityDF =std::make_shared<asl::DataInterpolation>(heatpipe_cavity); 
+    auto solidRegion =-cavityDF;
     
     //auto coldRegion =zPlusPlane| zMinusPlane| xPlusPlane| xMinusPlane;
     auto coldRegion =coldZPlus | coldXMinus|coldXPlus | coldYMinus|coldYPlus;
     auto coldWall =  cavityDF & coldRegion;
     auto hotWall  =  cavityDF & (-coldRegion);
 
+
+    auto coldSolid =solidRegion & coldRegion;
+    auto hotSolid =solidRegion & (-coldRegion);
     auto coldWallMap =asl::generateDataContainerACL_SP<FlT>(block,1,1u);
     auto hotWallMap = asl::generateDataContainerACL_SP<FlT>(block,1,1u);
 
@@ -297,6 +384,18 @@ int main()
     std::cout<<"Initializing different heatpipe walls+windows with correct boundary condition temperatures"<<std::endl;
     asl::initData(coldWallMap,asl::normalize(coldWall, dx));
     asl::initData(hotWallMap,asl::normalize(hotWall, dx));
+
+    auto solidMap =asl::generateDataContainerACL_SP<FlT>( block,1,1u);
+    auto coldSolidMap =asl::generateDataContainerACL_SP<FlT>(block,1,1u);
+    auto hotSolidMap =asl::generateDataContainerACL_SP<FlT>(block,1,1u);
+
+    // Initialize volumetric masks
+    asl::initData(solidMap,asl::normalize(solidRegion,dx));
+    asl::initData(coldSolidMap,asl::normalize(coldSolid,dx));
+    asl::initData(hotSolidMap,asl::normalize(hotSolid,dx));
+
+
+
     //imposing boundary conditins.
     const double T = targetTemperatures_C[0]+273.15;
     //thermalbc.push_back(asl::generateBCConstantValue(temperature,T,hotWallMap));
@@ -317,6 +416,8 @@ int main()
     //paraview debug
     writer.addScalars("coldWallMap", *coldWallMap);
     writer.addScalars("hotWallMap",  *hotWallMap);
+    writer.addScalars("coldSolidMap", *coldSolidMap);
+    writer.addScalars("hotSolidMap",  *hotSolidMap);
 
  
     //Temperature diffusion solver
@@ -366,6 +467,7 @@ int main()
     writer.addScalars("PAr_Torr", *PArField);
     writer.addScalars("PB_Torr", *PBField);
     writer.addScalars("Ptotal_Torr", *PtotalField);
+    writer.addScalars("nArRef",*nArRef);
 
     // ============================================================
     // QUASI-STATIC TEMPERATURE CASES
@@ -373,8 +475,8 @@ int main()
     // Number of numerical iterations.
     // These DO NOT represent physical seconds.
     // We are simply advancing the fields toward steady state.
-    const unsigned int thermalSteps = 2000;
-    const unsigned int smSteps      = 2000;
+    const unsigned int thermalSteps = 200000;//something large.. when the tempr converge it will breakup the loop anyway.
+    const unsigned int smSteps      = 2000000;
 
     //executeAll(thermalbc);
     // ============================================================
@@ -404,14 +506,25 @@ int main()
         std::cout << "Executing temperature diffusion...\n";
         for (unsigned int iteration = 1;iteration <= thermalSteps;++iteration)
         {
+            auto tmstart = std::chrono::high_resolution_clock::now();
             nm->execute();
             executeAll(thermalbc);
-            if (!(iteration % 100))
+            
+            TemperatureCubeResult result;
+            if (!(iteration % 500))
             {
-                std::cout<< "  thermal iteration "<< iteration<< " / "<< thermalSteps<< std::endl;
+
                 //writer.write();
+                result =checkTemperatureCube(temperature,gasVolumeMap,0,0,0, 20, Thot_K,1.0);
+                auto tmend = std::chrono::high_resolution_clock::now();
+                std::cout<< "  thermal iteration "<< iteration<< " / "<< thermalSteps<< std::endl;
+                std::chrono::duration<double> elapsed = tmend - tmstart;
+                std::cout<< "Thermal diffusion 100th step Elapsed time = "<< elapsed.count()<< " seconds"<< std::endl;
             }
+           
+            if(result.converged ==true) {break; std::cout<<"Temperature converged.. exiting thermal diffusion"<<std::endl;}
         }
+       
         std::cout<< "Steady-state Temperature field computation complete.\n";
         //return 0;    
 
@@ -427,11 +540,18 @@ int main()
         double Peq_Pa =calculatePeq(temperature, gasVolumeMap,NAr);
         const double Peq_Torr =Peq_Pa / 133.322368;
         std::cout<< "Equillibirum Pressure at "<<Thot_C<<" : "<< Peq_Torr<< " Torr\n";
+        
+        auto start1 = std::chrono::high_resolution_clock::now();
         updatePeqField(PeqField,gasVolumeMap,Peq_Torr);
+        auto end1 = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed1 = end1 - start1;
+        std::cout<< "Elapsed time = "<< elapsed1.count()<< " seconds"<< std::endl;
 
         initializeCAr(cAr, temperature, gasVolumeMap, Peq_Pa);
         updateNumberDensity(nAr,cAr,gasVolumeMap);
-        updatePressureFields(PArField,PBField,PtotalField,cAr,cB,temperature,gasVolumeMap);
+        copyField(nArRef,nAr);
+        updateMoleFractions( xB,xAr,cB,cAr,gasVolumeMap);
+        updatePressureFields(PArField,PBField,PtotalField,xAr,xB,gasVolumeMap, Peq_Pa);
    
         // CHECK ARGON CONSERVATION
         const double NAr_check =calculateTotalNAr(nAr,gasVolumeMap);
@@ -446,29 +566,50 @@ int main()
         std::cout<< "Source/sink cache ready."<< std::endl;
         applySourceAndSinkFast(cB,sourceSinkCache);
         //applySourceAndSink(cB,temperature,SourceMap,gasVolumeMap);
+       
         executeAll(smBC);       //No species transport through steel walls
+
+        double Pmix_Pa =Peq_Pa;
+      
+        ConcentrationConvergenceState concentrationState;
 
         //Ar-B TRANSPORT USING STEFAN-MAXWELL'S DIFFUSION 
         std::cout << "Evolving Ar-B diffusion...\n";
+        const auto smStart =std::chrono::high_resolution_clock::now();
         for (unsigned int iteration = 1;iteration <= smSteps;++iteration)
         {
+            //const auto smStart =std::chrono::high_resolution_clock::now();
             smTransport->execute(); // Coupled Li-Ar Stefan-Maxwell update
             executeAll(smBC);       // No species transport through steel walls
-
+            //const auto smEnd =std::chrono::high_resolution_clock::now();
+            //std::chrono::duration<double> smElapsed = smEnd - smStart;
+            //std::cout<< "sm Elapsed time = "<< smElapsed.count()<< " seconds"<< std::endl;
             // B reservoir restores saturated composition
             applySourceAndSinkFast(cB,sourceSinkCache);
             //applySourceAndSink(cB,temperature,SourceMap,gasVolumeMap);
         
-            if (!(iteration % 1000))
+            if (!(iteration % 500))
             {
+                const auto cResult =
+                checkConcentrationCube(cAr,cB,gasVolumeMap,0,0,0,20, 1.0e-5,  1.0e-12,concentrationState);
+                //const auto smStart1 =std::chrono::high_resolution_clock::now();
                 updateNumberDensity(nB,cB,gasVolumeMap);
                 updateNumberDensity(nAr,cAr,gasVolumeMap);
                 updateMoleFractions(xB,xAr,cB,cAr,gasVolumeMap);
-                updatePressureFields(PArField,PBField,PtotalField,cAr,cB,temperature,gasVolumeMap);
+                double Pmix_Pa =calculatePeqBinary(temperature,xAr,gasVolumeMap,NAr);
+                updatePressureFields(PArField,PBField,PtotalField,xAr,xB,gasVolumeMap, Pmix_Pa);
+                updatePeqField(PeqField,gasVolumeMap,Pmix_Pa / torrToPa);
                 writer.write();
-                std::cout<< "  STEFAN-MAXWELL iteration "<< iteration<< " / "<< smSteps<< std::endl;
+                std::cout<< "  STEFAN-MAXWELL iteration "<< iteration<< " / "<< smSteps<< " | Pmix = "<< Pmix_Pa / torrToPa<< " Torr"<<std::endl;
+                //const auto smEnd1 =std::chrono::high_resolution_clock::now();
+                //std::chrono::duration<double> smElapsed1 = smEnd1 - smStart1;
+                //std::cout<< "sm Elapsed1 time = "<< smElapsed1.count()<< " seconds"<< std::endl;
+                if(cResult.converged == true) break;
             }
         }
+        const auto smEnd =std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> smElapsed = smEnd - smStart;
+        std::cout<< "sm diffusion Elapsed time = "<< smElapsed.count()<< " seconds"<< std::endl;
 
         std::cout<< "Ar-B diffusion computation complete...\n";
         //updateNumberDensity(nB,cB,gasVolumeMap);
@@ -496,68 +637,127 @@ void updatePressureFields(
     const asl::SPDataWithGhostNodesACLData& PAr,
     const asl::SPDataWithGhostNodesACLData& PB,
     const asl::SPDataWithGhostNodesACLData& Ptotal,
-    const asl::SPDataWithGhostNodesACLData& cAr,
-    const asl::SPDataWithGhostNodesACLData& cB,
-    const asl::SPDataWithGhostNodesACLData& temperature,
-    const asl::SPDataWithGhostNodesACLData& gasVolumeMap)
+    const asl::SPDataWithGhostNodesACLData& xAr,
+    const asl::SPDataWithGhostNodesACLData& xB,
+    const asl::SPDataWithGhostNodesACLData& gasVolumeMap,
+    double Pmix_Pa)
 {
-    const auto& internal = cAr->getInternalBlock();
-    const auto size = internal.getSize();
+    // ------------------------------------------------------------
+    // Internal computational region
+    // ------------------------------------------------------------
+    const auto& internal =xAr->getInternalBlock();
+    const auto size =internal.getSize();
+    // ------------------------------------------------------------
+    // Blocks
+    // ------------------------------------------------------------
+    const auto& bPA =PAr->getBlock();
+    const auto& bPB =PB->getBlock();
+    const auto& bPT =Ptotal->getBlock();
+    const auto& bXA =xAr->getBlock();
+    const auto& bXB =xB->getBlock();
+    const auto& bG = gasVolumeMap->getBlock();
 
-    const auto& bPA = PAr->getBlock();
-    const auto& bPB = PB->getBlock();
-    const auto& bPT = Ptotal->getBlock();
-    const auto& bCA = cAr->getBlock();
-    const auto& bCB = cB->getBlock();
-    const auto& bT  = temperature->getBlock();
-    const auto& bG  = gasVolumeMap->getBlock();
 
-    const int gPA = PAr->getGhostBorder();
-    const int gPB = PB->getGhostBorder();
-    const int gPT = Ptotal->getGhostBorder();
-    const int gCA = cAr->getGhostBorder();
-    const int gCB = cB->getGhostBorder();
-    const int gT  = temperature->getGhostBorder();
-    const int gG  = gasVolumeMap->getGhostBorder();
+    // ------------------------------------------------------------
+    // Ghost widths
+    // ------------------------------------------------------------
+    const int gPA =PAr->getGhostBorder();
+    const int gPB =PB->getGhostBorder();
+    const int gPT =Ptotal->getGhostBorder();
+    const int gXA =xAr->getGhostBorder();
+    const int gXB =xB->getGhostBorder();
+    const int gG =gasVolumeMap->getGhostBorder();
 
-    auto paMap = acl::map<double>(PAr->getContainer()[0]);
-    auto pbMap = acl::map<double>(PB->getContainer()[0]);
-    auto ptMap = acl::map<double>(Ptotal->getContainer()[0]);
-    auto caMap = acl::map<double>(cAr->getContainer()[0]);
-    auto cbMap = acl::map<double>(cB->getContainer()[0]);
-    auto tMap  = acl::map<double>(temperature->getContainer()[0]);
-    auto gMap  = acl::map<double>(gasVolumeMap->getContainer()[0]);
-
-    double* PA = paMap.get();
-    double* PBv = pbMap.get();
+    // ------------------------------------------------------------
+    // Map fields
+    // ------------------------------------------------------------
+    auto paMap =acl::map<double>(PAr->getContainer()[0]);
+    auto pbMap =acl::map<double>(PB->getContainer()[0]);
+    auto ptMap =acl::map<double>(Ptotal->getContainer()[0]);
+    auto xaMap =acl::map<double>(xAr->getContainer()[0]);
+    auto xbMap =acl::map<double>(xB->getContainer()[0]);
+    auto gMap =acl::map<double>(gasVolumeMap->getContainer()[0]);
+    double* PA =paMap.get();
+    double* PBv =pbMap.get();
     double* PT = ptMap.get();
+    const double* XA =xaMap.get();
+    const double* XB = xbMap.get();
+    const double* G =gMap.get();
 
-    const double* CA = caMap.get();
-    const double* CB = cbMap.get();
-    const double* T = tMap.get();
-    const double* G = gMap.get();
+
+    // ------------------------------------------------------------
+    // Uniform equilibrium mixture pressure
+    // ------------------------------------------------------------
+    const double Pmix_Torr = Pmix_Pa / torrToPa;
+    constexpr double eps =1.0e-30;
+
+    // ============================================================
+    // Build pressure fields
+    //
+    //      PAr    = xAr * Pmix
+    //      PB     = xB  * Pmix
+    //      Ptotal = Pmix
+    //
+    // ============================================================
 
     for (int i = 0; i < size[0]; ++i)
     for (int j = 0; j < size[1]; ++j)
     for (int k = 0; k < size[2]; ++k)
     {
-        const int idPA = bPA.c2i(asl::makeAVec(i+gPA,j+gPA,k+gPA));
-        const int idPB = bPB.c2i(asl::makeAVec(i+gPB,j+gPB,k+gPB));
-        const int idPT = bPT.c2i(asl::makeAVec(i+gPT,j+gPT,k+gPT));
-        const int idCA = bCA.c2i(asl::makeAVec(i+gCA,j+gCA,k+gCA));
-        const int idCB = bCB.c2i(asl::makeAVec(i+gCB,j+gCB,k+gCB));
-        const int idT  = bT.c2i(asl::makeAVec(i+gT,j+gT,k+gT));
-        const int idG  = bG.c2i(asl::makeAVec(i+gG,j+gG,k+gG));
+        const int idPA =bPA.c2i(asl::makeAVec(i + gPA,j + gPA, k + gPA));
+        const int idPB = bPB.c2i( asl::makeAVec(i + gPB,j + gPB,k + gPB) );
+        const int idPT =bPT.c2i(asl::makeAVec(i + gPT,j + gPT,k + gPT));
+        const int idXA =bXA.c2i( asl::makeAVec(i + gXA,j + gXA,k + gXA));
+        const int idXB = bXB.c2i( asl::makeAVec(i + gXB,j + gXB,k + gXB));
+        const int idG =bG.c2i(asl::makeAVec(i + gG,j + gG,k + gG));
 
+        // --------------------------------------------------------
+        // Inside gas cavity
+        // --------------------------------------------------------
         if (G[idG] > 0.5)
         {
-            const double PAr_Pa =std::max(0.0, CA[idCA]) * R * T[idT];
-            const double PB_Pa =std::max(0.0, CB[idCB]) * R * T[idT];
+            double xa =std::max(0.0,XA[idXA]);
+            double xb =std::max(0.0,XB[idXB]);
 
-            PA[idPA]  = PAr_Pa / torrToPa;
-            PBv[idPB] = PB_Pa  / torrToPa;
-            PT[idPT]  = (PAr_Pa + PB_Pa) / torrToPa;
+            // ----------------------------------------------------
+            // Normalize defensively.
+            //
+            // updateMoleFractions() should already make:
+            //
+            //      xa + xb = 1
+            //
+            // but this removes tiny numerical errors.
+            // ----------------------------------------------------
+            const double xsum = xa + xb;
+
+            if (xsum > eps)
+            {
+                xa /= xsum;
+                xb /= xsum;
+            }
+            else
+            {
+                xa = 0.0;
+                xb = 0.0;
+            }
+
+
+            // ----------------------------------------------------
+            // Dalton's law
+            // ----------------------------------------------------
+            PA[idPA] =xa * Pmix_Torr;
+            PBv[idPB] =xb * Pmix_Torr;
+
+            // ----------------------------------------------------
+            // Mechanical-equilibrium total pressure
+            // ----------------------------------------------------
+            PT[idPT] =
+                Pmix_Torr;
         }
+
+        // --------------------------------------------------------
+        // Solid / outside chamber
+        // --------------------------------------------------------
         else
         {
             PA[idPA]  = 0.0;
@@ -951,7 +1151,6 @@ void applySourceAndSink(
     const auto& internal = cB->getInternalBlock();
     const auto size =internal.getSize();
 
-
     // ------------------------------------------------------------
     // ASL blocks
     // ------------------------------------------------------------
@@ -1044,7 +1243,7 @@ void applySourceAndSink(
         // --------------------------------------------------------
         // Local B sample saturation pressure from Nesmeyanov curve
         // --------------------------------------------------------
-        const double PB_sat =sampleVaporPressure(Tw,A1,B1,C1);     // Pa
+        const double PB_sat =sampleVaporPressure(Tw,A1,B1,C1, D1);     // Pa
 
         // --------------------------------------------------------
         // Saturated molar concentration
@@ -1117,7 +1316,7 @@ void applySourceAndSink(
         // --------------------------------------------------------
         // Saturation pressure over liquid B
         // --------------------------------------------------------
-        const double PB_sat =sampleVaporPressure(Ts, A1, B1, C1);
+        const double PB_sat =sampleVaporPressure(Ts, A1, B1, C1, D1);
 
         // --------------------------------------------------------
         // Saturated B concentration
@@ -1182,15 +1381,22 @@ void applySourceAndSink(
     }
 }
 
-double sampleVaporPressure(double T, const double A, const double B, const double C)
+//double sampleVaporPressure(double T, const double A, const double B, const double C)
+//{
+//    double log10P_bar =A - B / (T + C);
+//
+//    double P_bar =std::pow(10.0, log10P_bar);
+//
+//    return P_bar * 1.0e5;   // Pa
+//
+//}
+
+double sampleVaporPressure(double T,double A,double B,double C,double D)
 {
-    double log10P_bar =A - B / (T + C);
-
-    double P_bar =std::pow(10.0, log10P_bar);
-
-    return P_bar * 1.0e5;   // Pa
-
+    const double log10P =A- B / T+ C * T+ D * std::log10(T);
+    return std::pow(10.0, log10P)*torrToPa;
 }
+
 
 double calculateTotalNAr(
     const asl::SPDataWithGhostNodesACLData& nAr,
@@ -1645,6 +1851,23 @@ double calculateGasVolume(
 }
 
 
+// ============================================================
+// BUILD SOURCE / SINK CACHE
+//
+// Called ONCE per temperature case AFTER T has converged.
+//
+// The geometry and temperature are fixed during the SM
+// evolution, therefore:
+//
+//   * wall-adjacent gas cells are found once
+//   * source cells are found once
+//   * Psat(T) is calculated once
+//   * cSat(T) is calculated once
+//
+// During SM evolution we therefore only touch the relevant
+// cached cB cells.
+// ============================================================
+
 SourceSinkCache buildSourceSinkCache(
     const asl::SPDataWithGhostNodesACLData& cB,
     const asl::SPDataWithGhostNodesACLData& temperature,
@@ -1654,7 +1877,7 @@ SourceSinkCache buildSourceSinkCache(
     SourceSinkCache cache;
 
     // ------------------------------------------------------------
-    // Internal region
+    // Internal computational region
     // ------------------------------------------------------------
     const auto& internal = cB->getInternalBlock();
     const auto size = internal.getSize();
@@ -1662,6 +1885,22 @@ SourceSinkCache buildSourceSinkCache(
     const int Nz = size[0];
     const int Ny = size[1];
     const int Nx = size[2];
+
+
+    // ------------------------------------------------------------
+    // Coordinate convention in this program:
+    //
+    //      component 0 -> z -> i
+    //      component 1 -> y -> j
+    //      component 2 -> x -> k
+    //
+    // The physical sample lies flat in the x-y plane.
+    //
+    // Therefore:
+    //
+    //      "above the sample" = +z = i + 1
+    // ------------------------------------------------------------
+
 
     // ------------------------------------------------------------
     // ASL blocks
@@ -1671,37 +1910,55 @@ SourceSinkCache buildSourceSinkCache(
     const auto& bS = SourceMap->getBlock();
     const auto& bG = gasVolumeMap->getBlock();
 
+
     // ------------------------------------------------------------
-    // Ghost widths
+    // Ghost-border widths
     // ------------------------------------------------------------
     const int gc = cB->getGhostBorder();
     const int gt = temperature->getGhostBorder();
     const int gs = SourceMap->getGhostBorder();
     const int gg = gasVolumeMap->getGhostBorder();
 
+
     // ------------------------------------------------------------
-    // Map the FIXED fields to host memory ONCE
+    // Map FIXED fields to host memory ONCE
     // ------------------------------------------------------------
     auto temperatureMap =
-        acl::map<double>(temperature->getContainer()[0]);
+        acl::map<double>(
+            temperature->getContainer()[0]
+        );
 
     auto sourceMap =
-        acl::map<double>(SourceMap->getContainer()[0]);
+        acl::map<double>(
+            SourceMap->getContainer()[0]
+        );
 
     auto gasMap =
-        acl::map<double>(gasVolumeMap->getContainer()[0]);
+        acl::map<double>(
+            gasVolumeMap->getContainer()[0]
+        );
 
-    const double* T = temperatureMap.get();
-    const double* S = sourceMap.get();
-    const double* G = gasMap.get();
 
-    // ------------------------------------------------------------
-    // Helper: is logical cell (i,j,k) a gas cell?
+    const double* T =
+        temperatureMap.get();
+
+    const double* S =
+        sourceMap.get();
+
+    const double* G =
+        gasMap.get();
+
+
+    // ============================================================
+    // HELPER:
     //
-    // Outside computational domain is treated as non-gas.
-    // This also avoids unsafe i-1, j-1, etc. indexing.
-    // ------------------------------------------------------------
-    auto isGas = [&](int i, int j, int k) -> bool
+    // Determine whether logical voxel (i,j,k) is gas.
+    //
+    // Any cell outside the internal domain is treated as non-gas.
+    // ============================================================
+
+    auto isGas =
+        [&](int i, int j, int k) -> bool
     {
         if (i < 0 || i >= Nz ||
             j < 0 || j >= Ny ||
@@ -1727,19 +1984,32 @@ SourceSinkCache buildSourceSinkCache(
     // PART 1
     //
     // FIND ALL WALL-ADJACENT GAS CELLS
+    //
+    // These are the only locations where condensation is allowed.
     // ============================================================
+
+    std::size_t totalGasCells = 0;
+
 
     for (int i = 0; i < Nz; ++i)
     for (int j = 0; j < Ny; ++j)
     for (int k = 0; k < Nx; ++k)
     {
-        // Current cell must be gas
+        // --------------------------------------------------------
+        // Current voxel must be gas
+        // --------------------------------------------------------
         if (!isGas(i,j,k))
             continue;
 
+        ++totalGasCells;
+
+
         // --------------------------------------------------------
-        // Is this gas cell touching a wall/non-gas cell?
+        // Check six nearest neighbors
+        //
+        // If ANY neighbor is non-gas, this gas cell touches a wall.
         // --------------------------------------------------------
+
         const bool adjacentToWall =
             !isGas(i + 1, j,     k    ) ||
             !isGas(i - 1, j,     k    ) ||
@@ -1748,8 +2018,10 @@ SourceSinkCache buildSourceSinkCache(
             !isGas(i,     j,     k + 1) ||
             !isGas(i,     j,     k - 1);
 
+
         if (!adjacentToWall)
             continue;
+
 
         // --------------------------------------------------------
         // cB index
@@ -1763,6 +2035,7 @@ SourceSinkCache buildSourceSinkCache(
                 )
             );
 
+
         // --------------------------------------------------------
         // Temperature index
         // --------------------------------------------------------
@@ -1775,30 +2048,35 @@ SourceSinkCache buildSourceSinkCache(
                 )
             );
 
-        const double Tw = T[idT];
+
+        const double Tw =
+            T[idT];
+
 
         if (Tw <= 0.0)
             continue;
 
-        // --------------------------------------------------------
-        // Saturated B pressure
-        // --------------------------------------------------------
-        const double PB_sat =
-            sampleVaporPressure(
-                Tw,
-                A1,
-                B1,
-                C1
-            );
 
         // --------------------------------------------------------
-        // Saturated molar concentration
+        // Local saturation vapor pressure
         //
-        //       c_sat = P_sat / (R T)
+        // sampleVaporPressure() returns Pa
         // --------------------------------------------------------
-        const double cB_sat =
-            PB_sat / (R * Tw);
+        const double PB_sat =sampleVaporPressure(Tw,A1,B1,C1, D1);
 
+        // --------------------------------------------------------
+        // Saturated molar concentration:
+        //
+        //      c_sat = P_sat / (R T)
+        //
+        // [mol/m^3]
+        // --------------------------------------------------------
+        const double cB_sat = PB_sat / (R * Tw);
+
+
+        // --------------------------------------------------------
+        // Store everything needed during SM evolution
+        // --------------------------------------------------------
         cache.condensationCells.push_back(
             {
                 idC,
@@ -1811,143 +2089,131 @@ SourceSinkCache buildSourceSinkCache(
     // ============================================================
     // PART 2
     //
-    // FIND GAS CELLS DIRECTLY ABOVE RESERVOIR
+    // SOURCE MAP ITSELF IS THE EMITTER
     //
-    // Coordinate convention:
+    // Every voxel for which:
     //
-    //      i -> z
-    //      j -> y
-    //      k -> x
+    //      SourceMap(i,j,k) > 0.5
     //
-    // Therefore ABOVE means:
+    // is treated as an emitting reservoir voxel.
     //
-    //      j + 1
+    // There is NO:
     //
-    // NOT i + 1.
+    //      +z search
+    //      i + 1
+    //      top-surface detection
+    //      separate gas layer above the source
+    //
+    // The source concentration is imposed DIRECTLY on every
+    // SourceMap voxel:
+    //
+    //      cB = Psat(T)/(R T)
+    //
+    // Therefore source thickness may be arbitrary.
     // ============================================================
 
     for (int i = 0; i < Nz; ++i)
     for (int j = 0; j < Ny; ++j)
     for (int k = 0; k < Nx; ++k)
     {
-        const int idS =
-            bS.c2i(
-                asl::makeAVec(
-                    i + gs,
-                    j + gs,
-                    k + gs
-                )
-            );
+        // --------------------------------------------------------
+        // SourceMap index
+        // --------------------------------------------------------
+        const int idS =bS.c2i(asl::makeAVec(i + gs,j + gs,k + gs));
 
-        // Current cell is not part of reservoir
+        // --------------------------------------------------------
+        // Not part of emitter
+        // --------------------------------------------------------
         if (S[idS] <= 0.5)
             continue;
 
-        // No interior cell above this one
-        if (j + 1 >= Ny)
-            continue;
-
         // --------------------------------------------------------
-        // IMPORTANT FIX:
+        // Current voxel must belong to gas computational domain
         //
-        // +y = j + 1
-        //
-        // Your old code incorrectly used i + 1.
+        // Since your buildSourceMap() currently creates source
+        // cells only where gasVolumeMap > 0.5, this should normally
+        // always pass.
         // --------------------------------------------------------
-        const int idSAbove =
-            bS.c2i(
-                asl::makeAVec(
-                    i + gs,
-                    j + 1 + gs,
-                    k + gs
-                )
-            );
+        const int idG =bG.c2i(asl::makeAVec(i + gg,j + gg,k + gg));
 
-        // If another source voxel is above, current voxel
-        // is not the top surface.
-        if (S[idSAbove] > 0.5)
+        if (G[idG] <= 0.5)
             continue;
 
         // --------------------------------------------------------
-        // Gas immediately above source?
+        // SAME voxel's B concentration index
         // --------------------------------------------------------
-        const int idGAbove =
-            bG.c2i(
-                asl::makeAVec(
-                    i + gg,
-                    j + 1 + gg,
-                    k + gg
-                )
-            );
-
-        if (G[idGAbove] <= 0.5)
-            continue;
+        const int idC = bC.c2i(asl::makeAVec(i + gc,j + gc,k + gc));
 
         // --------------------------------------------------------
-        // cB and T indices of gas cell above reservoir
+        // SAME voxel's temperature index
         // --------------------------------------------------------
-        const int idCAbove =
-            bC.c2i(
-                asl::makeAVec(
-                    i + gc,
-                    j + 1 + gc,
-                    k + gc
-                )
-            );
-
-        const int idTAbove =
-            bT.c2i(
-                asl::makeAVec(
-                    i + gt,
-                    j + 1 + gt,
-                    k + gt
-                )
-            );
-
-        const double Ts = T[idTAbove];
+        const int idT =bT.c2i(asl::makeAVec(i + gt,j + gt,k + gt));
+        const double Ts =T[idT];
 
         if (Ts <= 0.0)
             continue;
 
-        // --------------------------------------------------------
-        // Reservoir saturation pressure
-        // --------------------------------------------------------
-        const double PB_sat =
-            sampleVaporPressure(
-                Ts,
-                A1,
-                B1,
-                C1
-            );
 
         // --------------------------------------------------------
-        // Reservoir concentration
+        // Saturation vapor pressure at local source temperature
         // --------------------------------------------------------
-        const double cB_source =
-            PB_sat / (R * Ts);
+        const double PB_sat =sampleVaporPressure(Ts,A1,B1,C1, D1);
 
-        cache.sourceCells.push_back(
-            {
-                idCAbove,
-                cB_source,
-                Ts
-            }
-        );
+
+        // --------------------------------------------------------
+        // Saturated B concentration
+        //
+        //      cB_source = Psat(T)/(R T)
+        //
+        // --------------------------------------------------------
+        const double cB_source =PB_sat /(R * Ts);
+
+        // --------------------------------------------------------
+        // Cache THIS SourceMap voxel itself as emitter
+        // --------------------------------------------------------
+        cache.sourceCells.push_back({idC,cB_source,Ts});
     }
 
 
     // ============================================================
-    // DIAGNOSTIC
+    // CACHE DIAGNOSTICS
     // ============================================================
+
+    const double wallFraction =
+        (totalGasCells > 0)
+        ?
+        100.0 *
+        static_cast<double>(
+            cache.condensationCells.size()
+        )
+        /
+        static_cast<double>(
+            totalGasCells
+        )
+        :
+        0.0;
+
 
     std::cout
         << "\n========================================"
+
         << "\nSOURCE / SINK CACHE CREATED"
+
+        << "\nTotal gas cells         = "
+        << totalGasCells
+
         << "\nWall-adjacent gas cells = "
         << cache.condensationCells.size()
+
         << "\nReservoir source cells  = "
         << cache.sourceCells.size()
+
+        << "\nWall-cell fraction      = "
+        << wallFraction
+        << " %"
+
         << "\n========================================"
+
         << std::endl;
 
 
@@ -1955,22 +2221,23 @@ SourceSinkCache buildSourceSinkCache(
 }
 
 
+
 // ============================================================
 // FAST SOURCE / SINK UPDATE
 //
-// This is the ONLY function called inside the SM loop.
+// Called EVERY Stefan-Maxwell iteration.
 //
-// No:
+// Unlike the original function:
 //
-//   * full 3-D scan
-//   * gasVolumeMap mapping
-//   * SourceMap mapping
-//   * temperature mapping
-//   * neighbor searching
-//   * c2i calculations
-//   * vapor-pressure calculations
+//   NO full 3-D scan
+//   NO SourceMap mapping
+//   NO gasVolumeMap mapping
+//   NO temperature mapping
+//   NO neighbor searching
+//   NO sampleVaporPressure()
+//   NO repeated c2i()
 //
-// Only cB is mapped.
+// Only the cached concentration indices are touched.
 // ============================================================
 
 void applySourceAndSinkFast(
@@ -1978,58 +2245,97 @@ void applySourceAndSinkFast(
     const SourceSinkCache& cache)
 {
     // ------------------------------------------------------------
-    // Map ONLY the changing B concentration field
+    // Map ONLY changing concentration field
     // ------------------------------------------------------------
     auto cBMap =
         acl::map<double>(
             cB->getContainer()[0]
         );
 
-    double* C = cBMap.get();
+    double* C =
+        cBMap.get();
 
 
     // ============================================================
     // PART 1
-    // CONDENSATION
     //
-    // cB -> min(cB, cSat)
+    // CONDENSATION SINK
+    //
+    // At wall-adjacent cells:
+    //
+    //      if cB > cSat(Twall)
+    //
+    // then:
+    //
+    //      cB -> cSat
+    //
     // ============================================================
 
-    double totalRemovedConcentration = 0.0;
-    unsigned int condensationCells = 0;
+    double totalRemovedConcentration =
+        0.0;
 
-    for (const auto& cell : cache.condensationCells)
+    unsigned int condensationCells =
+        0;
+
+
+    for (const auto& cell :
+         cache.condensationCells)
     {
-        const double oldValue = C[cell.cIndex];
+        const double current =
+            C[cell.cIndex];
 
-        if (oldValue > cell.cSat)
+
+        if (current > cell.cSat)
         {
             totalRemovedConcentration +=
-                oldValue - cell.cSat;
+                current -
+                cell.cSat;
+
 
             C[cell.cIndex] =
                 cell.cSat;
+
 
             ++condensationCells;
         }
     }
 
 
+
     // ============================================================
     // PART 2
+    //
     // RESERVOIR SOURCE
     //
-    // Source is applied AFTER sink so source boundary wins.
+    // Force gas immediately above sample to:
+    //
+    //      cB = Psat(Ts)/(R Ts)
+    //
+    // Applied AFTER condensation so the physical reservoir
+    // boundary always wins.
     // ============================================================
 
-    double maxSourceTemperature = 0.0;
-    double maxSourceConcentration = 0.0;
-    double maxSourceDelta = 0.0;
+    double maxSourceTemperature =
+        0.0;
 
-    for (const auto& cell : cache.sourceCells)
+    double maxSourceConcentration =
+        0.0;
+
+    double maxSourceDelta =
+        0.0;
+
+
+    for (const auto& cell :
+         cache.sourceCells)
     {
+        const double oldConcentration =
+            C[cell.cIndex];
+
+
         const double delta =
-            cell.cSat - C[cell.cIndex];
+            cell.cSat -
+            oldConcentration;
+
 
         maxSourceDelta =
             std::max(
@@ -2037,17 +2343,20 @@ void applySourceAndSinkFast(
                 std::abs(delta)
             );
 
+
         maxSourceTemperature =
             std::max(
                 maxSourceTemperature,
                 cell.temperature
             );
 
+
         maxSourceConcentration =
             std::max(
                 maxSourceConcentration,
                 cell.cSat
             );
+
 
         // --------------------------------------------------------
         // Dirichlet reservoir condition
@@ -2057,12 +2366,16 @@ void applySourceAndSinkFast(
     }
 
 
+
     // ============================================================
     // DIAGNOSTICS
     // ============================================================
 
-    static unsigned long callCount = 0;
+    static unsigned long callCount =
+        0;
+
     ++callCount;
+
 
     if (callCount % 100 == 0)
     {
@@ -2095,6 +2408,734 @@ void applySourceAndSinkFast(
             << " mol/m^3"
 
             << "\n---------------------------------------"
+
             << std::endl;
     }
+}
+
+void copyField(
+    const asl::SPDataWithGhostNodesACLData& dst,
+    const asl::SPDataWithGhostNodesACLData& src)
+{
+    const auto& internal =src->getInternalBlock();
+    const auto size =internal.getSize();
+    const auto& bDst =dst->getBlock();
+    const auto& bSrc =src->getBlock();
+    const int gd =dst->getGhostBorder();
+    const int gs =src->getGhostBorder();
+    auto dstMap =acl::map<double>(dst->getContainer()[0]);
+    auto srcMap = acl::map<double>(src->getContainer()[0]);
+    double* D =dstMap.get();
+    const double* S =srcMap.get();
+
+
+    for (int i = 0; i < size[0]; ++i)
+    for (int j = 0; j < size[1]; ++j)
+    for (int k = 0; k < size[2]; ++k)
+    {
+        const int idD =bDst.c2i(asl::makeAVec(i + gd,j + gd,k + gd));
+        const int idS =bSrc.c2i(asl::makeAVec(i + gs,j + gs,k + gs));
+        D[idD] = S[idS];
+    }
+}
+
+TemperatureCubeResult checkTemperatureCube(
+    const asl::SPDataWithGhostNodesACLData& temperature,
+    const asl::SPDataWithGhostNodesACLData& gasVolumeMap,
+    double centerX,
+    double centerY,
+    double centerZ,
+    double cubeLength_mm,
+    double operatingT_K,
+    double tolerance_K)
+{
+    // ============================================================
+    // CHECK TEMPERATURE INSIDE A PHYSICAL CUBE
+    //
+    // User coordinate convention:
+    //
+    //      centerX [mm]
+    //      centerY [mm]
+    //      centerZ [mm]
+    //
+    // ASL indexing convention in this program:
+    //
+    //      i -> z
+    //      j -> y
+    //      k -> x
+    //
+    // Cube side length:
+    //
+    //      cubeLength_mm
+    //
+    // Convergence condition:
+    //
+    //      Tmin_cube >= operatingT_K - tolerance_K
+    //
+    // ============================================================
+
+    TemperatureCubeResult result;
+
+    if (cubeLength_mm <= 0.0)
+    {
+        throw std::runtime_error(
+            "checkTemperatureCube(): cubeLength_mm must be > 0."
+        );
+    }
+
+
+    // ------------------------------------------------------------
+    // Internal block
+    // ------------------------------------------------------------
+
+    const auto& internal =temperature->getInternalBlock();
+    const auto size =internal.getSize();
+    const double dx = internal.dx;
+    // ------------------------------------------------------------
+    // Cube physical limits
+    // ------------------------------------------------------------
+    const double half =0.5 * cubeLength_mm;
+    const double xmin =centerX - half;
+    const double xmax =centerX + half;
+    const double ymin =centerY - half;
+    const double ymax =centerY + half;
+    const double zmin =centerZ - half;
+    const double zmax =centerZ + half;
+
+
+    // ============================================================
+    // Convert physical coordinates -> logical grid indices
+    //
+    // internal.position:
+    //
+    //      [0] -> z
+    //      [1] -> y
+    //      [2] -> x
+    // ============================================================
+
+    int i0 =static_cast<int>(std::ceil((zmin - internal.position[0]) / dx));
+    int i1 =static_cast<int>(std::floor((zmax - internal.position[0]) / dx));
+    int j0 =static_cast<int>(std::ceil((ymin - internal.position[1]) / dx));
+    int j1 =static_cast<int>(std::floor((ymax - internal.position[1]) / dx));
+    int k0 =static_cast<int>(std::ceil((xmin - internal.position[2]) / dx));
+    int k1 =static_cast<int>(std::floor((xmax - internal.position[2]) / dx));
+    // ------------------------------------------------------------
+    // Make sure requested cube lies inside computational block
+    // ------------------------------------------------------------
+
+    if (i0 < 0 || i1 >= size[0] ||
+        j0 < 0 || j1 >= size[1] ||
+        k0 < 0 || k1 >= size[2])
+    {
+        throw std::runtime_error(
+            "checkTemperatureCube(): requested cube extends "
+            "outside computational domain."
+        );
+    }
+
+
+    // ------------------------------------------------------------
+    // ASL blocks
+    // ------------------------------------------------------------
+
+    const auto& bT = temperature->getBlock();
+    const auto& bG =gasVolumeMap->getBlock();
+    const int gt =temperature->getGhostBorder();
+    const int gg =gasVolumeMap->getGhostBorder();
+
+    // ------------------------------------------------------------
+    // Map fields to host
+    // ------------------------------------------------------------
+    auto tMap =acl::map<double>(temperature->getContainer()[0]);
+    auto gMap =acl::map<double>(gasVolumeMap->getContainer()[0]);
+    const double* T =tMap.get();
+    const double* G =gMap.get();
+
+    // ============================================================
+    // SEARCH CUBE
+    // ============================================================
+
+    double minimumT =std::numeric_limits<double>::infinity();
+    double temperatureSum =0.0;
+    std::size_t gasCells =0;
+
+    for (int i = i0; i <= i1; ++i)
+    for (int j = j0; j <= j1; ++j)
+    for (int k = k0; k <= k1; ++k)
+    {
+        const int idG = bG.c2i(asl::makeAVec(i + gg,j + gg,k + gg ));
+        // Ignore solid/outside cells
+        if (G[idG] <= 0.5)
+            continue;
+        const int idT = bT.c2i(asl::makeAVec(i + gt,j + gt,k + gt ));
+        const double localT =T[idT];
+        minimumT =std::min(minimumT,localT);
+        temperatureSum +=localT;
+        ++gasCells;
+    }
+
+
+    // ------------------------------------------------------------
+    // Cube must contain gas
+    // ------------------------------------------------------------
+
+    if (gasCells == 0)
+    {
+        throw std::runtime_error(
+            "checkTemperatureCube(): cube contains no gas cells."
+        );
+    }
+
+
+    // ------------------------------------------------------------
+    // Average temperature
+    // ------------------------------------------------------------
+    const double averageT =temperatureSum /static_cast<double>(gasCells);
+
+    // ============================================================
+    // CONVERGENCE TEST
+    //
+    // The MINIMUM temperature is used as the gate.
+    //
+    // Therefore every gas voxel in the cube must be at least:
+    //
+    //      operatingT_K - tolerance_K
+    // ============================================================
+    const bool converged =minimumT >=(operatingT_K - tolerance_K);
+
+        std::cout
+        << " | cube center = ("
+        << centerX << ", "
+        << centerY << ", "
+        << centerZ << ") mm"
+        << " | cube length = "
+        << cubeLength_mm
+        << " mm\n"
+        << " | Tmin = "
+        << minimumT
+        << " K"
+
+        << " | Tavg = "
+        << averageT
+        << " K"
+
+        << " | target = "
+        << operatingT_K
+        << " K\n"
+
+        << " | converged = "
+        << std::boolalpha
+        << converged
+        << std::endl;
+
+
+    result.minT=minimumT;
+    result.averageT=averageT;
+    result.gasCells=gasCells;
+    result.converged=converged;
+    return result;
+}
+
+
+ConcentrationCubeResult checkConcentrationCube(
+    const asl::SPDataWithGhostNodesACLData& cAr,
+    const asl::SPDataWithGhostNodesACLData& cB,
+    const asl::SPDataWithGhostNodesACLData& gasVolumeMap,
+
+    double centerX,
+    double centerY,
+    double centerZ,
+
+    double cubeLength_mm,
+
+    double relativeTolerance,
+    double absoluteTolerance,
+
+    ConcentrationConvergenceState& state)
+{
+    // ============================================================
+    // CONCENTRATION CONVERGENCE INSIDE A PHYSICAL CUBE
+    //
+    // Coordinate convention:
+    //
+    //      i -> z
+    //      j -> y
+    //      k -> x
+    //
+    // Convergence:
+    //
+    // |c_new - c_old|
+    //      <=
+    // absTol + relTol * max(|c_new|, |c_old|)
+    //
+    // Must be satisfied for BOTH average cAr and average cB.
+    // ============================================================
+
+    if (cubeLength_mm <= 0.0)
+    {
+        throw std::runtime_error(
+            "checkConcentrationCube(): cubeLength_mm must be > 0."
+        );
+    }
+
+
+    // ------------------------------------------------------------
+    // Internal computational block
+    // ------------------------------------------------------------
+
+    const auto& internal =
+        cAr->getInternalBlock();
+
+    const auto size =
+        internal.getSize();
+
+    const double dx =
+        internal.dx;
+
+
+    // ------------------------------------------------------------
+    // Physical limits of cube
+    // ------------------------------------------------------------
+
+    const double half =
+        0.5 * cubeLength_mm;
+
+
+    const double xmin = centerX - half;
+    const double xmax = centerX + half;
+
+    const double ymin = centerY - half;
+    const double ymax = centerY + half;
+
+    const double zmin = centerZ - half;
+    const double zmax = centerZ + half;
+
+
+    // ============================================================
+    // Convert physical coordinates to logical indices
+    //
+    // ASL:
+    //
+    //      [0] = z
+    //      [1] = y
+    //      [2] = x
+    // ============================================================
+
+    const int i0 =
+        static_cast<int>(
+            std::ceil(
+                (zmin - internal.position[0]) / dx
+            )
+        );
+
+    const int i1 =
+        static_cast<int>(
+            std::floor(
+                (zmax - internal.position[0]) / dx
+            )
+        );
+
+
+    const int j0 =
+        static_cast<int>(
+            std::ceil(
+                (ymin - internal.position[1]) / dx
+            )
+        );
+
+    const int j1 =
+        static_cast<int>(
+            std::floor(
+                (ymax - internal.position[1]) / dx
+            )
+        );
+
+
+    const int k0 =
+        static_cast<int>(
+            std::ceil(
+                (xmin - internal.position[2]) / dx
+            )
+        );
+
+    const int k1 =
+        static_cast<int>(
+            std::floor(
+                (xmax - internal.position[2]) / dx
+            )
+        );
+
+
+    // ------------------------------------------------------------
+    // Check cube lies inside domain
+    // ------------------------------------------------------------
+
+    if (i0 < 0 || i1 >= size[0] ||
+        j0 < 0 || j1 >= size[1] ||
+        k0 < 0 || k1 >= size[2])
+    {
+        throw std::runtime_error(
+            "checkConcentrationCube(): requested cube extends "
+            "outside computational domain."
+        );
+    }
+
+
+    // ------------------------------------------------------------
+    // Blocks
+    // ------------------------------------------------------------
+
+    const auto& bAr =
+        cAr->getBlock();
+
+    const auto& bB =
+        cB->getBlock();
+
+    const auto& bG =
+        gasVolumeMap->getBlock();
+
+
+    const int gAr =
+        cAr->getGhostBorder();
+
+    const int gB =
+        cB->getGhostBorder();
+
+    const int gG =
+        gasVolumeMap->getGhostBorder();
+
+
+    // ------------------------------------------------------------
+    // Map fields
+    // ------------------------------------------------------------
+
+    auto arMap =
+        acl::map<double>(
+            cAr->getContainer()[0]
+        );
+
+    auto bMap =
+        acl::map<double>(
+            cB->getContainer()[0]
+        );
+
+    auto gasMap =
+        acl::map<double>(
+            gasVolumeMap->getContainer()[0]
+        );
+
+
+    const double* Ar =
+        arMap.get();
+
+    const double* B =
+        bMap.get();
+
+    const double* G =
+        gasMap.get();
+
+
+    // ============================================================
+    // STATISTICS
+    // ============================================================
+
+    double minCAr =
+        std::numeric_limits<double>::infinity();
+
+    double maxCAr =
+        -std::numeric_limits<double>::infinity();
+
+    double minCB =
+        std::numeric_limits<double>::infinity();
+
+    double maxCB =
+        -std::numeric_limits<double>::infinity();
+
+
+    double sumCAr = 0.0;
+    double sumCB = 0.0;
+
+    std::size_t gasCells = 0;
+
+
+    // ============================================================
+    // SEARCH CUBE
+    // ============================================================
+
+    for (int i = i0; i <= i1; ++i)
+    for (int j = j0; j <= j1; ++j)
+    for (int k = k0; k <= k1; ++k)
+    {
+        const int idG =
+            bG.c2i(
+                asl::makeAVec(
+                    i + gG,
+                    j + gG,
+                    k + gG
+                )
+            );
+
+
+        // Only physical gas cells
+        if (G[idG] <= 0.5)
+            continue;
+
+
+        const int idAr =
+            bAr.c2i(
+                asl::makeAVec(
+                    i + gAr,
+                    j + gAr,
+                    k + gAr
+                )
+            );
+
+
+        const int idB =
+            bB.c2i(
+                asl::makeAVec(
+                    i + gB,
+                    j + gB,
+                    k + gB
+                )
+            );
+
+
+        const double localCAr =
+            Ar[idAr];
+
+        const double localCB =
+            B[idB];
+
+
+        // --------------------------------------------------------
+        // Ar statistics
+        // --------------------------------------------------------
+
+        minCAr =
+            std::min(
+                minCAr,
+                localCAr
+            );
+
+        maxCAr =
+            std::max(
+                maxCAr,
+                localCAr
+            );
+
+        sumCAr += localCAr;
+
+
+        // --------------------------------------------------------
+        // B statistics
+        // --------------------------------------------------------
+
+        minCB =
+            std::min(
+                minCB,
+                localCB
+            );
+
+        maxCB =
+            std::max(
+                maxCB,
+                localCB
+            );
+
+        sumCB += localCB;
+
+
+        ++gasCells;
+    }
+
+
+    if (gasCells == 0)
+    {
+        throw std::runtime_error(
+            "checkConcentrationCube(): cube contains no gas cells."
+        );
+    }
+
+
+    // ============================================================
+    // AVERAGES
+    // ============================================================
+
+    const double averageCAr =
+        sumCAr /
+        static_cast<double>(gasCells);
+
+
+    const double averageCB =
+        sumCB /
+        static_cast<double>(gasCells);
+
+
+    ConcentrationCubeResult result;
+
+
+    result.minCAr = minCAr;
+    result.maxCAr = maxCAr;
+    result.averageCAr = averageCAr;
+
+    result.minCB = minCB;
+    result.maxCB = maxCB;
+    result.averageCB = averageCB;
+
+    result.gasCells = gasCells;
+
+
+    // ============================================================
+    // FIRST CALL
+    //
+    // Nothing exists to compare against yet.
+    // Store current values as reference.
+    // ============================================================
+
+    if (!state.initialized)
+    {
+        state.previousAverageCAr =
+            averageCAr;
+
+        state.previousAverageCB =
+            averageCB;
+
+        state.initialized = true;
+
+        result.converged = false;
+
+        return result;
+    }
+
+
+    // ============================================================
+    // CHANGE SINCE PREVIOUS CHECK
+    // ============================================================
+
+    result.deltaCAr =
+        std::abs(
+            averageCAr -
+            state.previousAverageCAr
+        );
+
+
+    result.deltaCB =
+        std::abs(
+            averageCB -
+            state.previousAverageCB
+        );
+
+
+    // ------------------------------------------------------------
+    // Denominators for reporting relative change
+    // ------------------------------------------------------------
+
+    const double scaleAr =
+        std::max(
+            std::abs(averageCAr),
+            std::abs(state.previousAverageCAr)
+        );
+
+
+    const double scaleB =
+        std::max(
+            std::abs(averageCB),
+            std::abs(state.previousAverageCB)
+        );
+
+
+    if (scaleAr > 0.0)
+    {
+        result.relativeChangeCAr =
+            result.deltaCAr /
+            scaleAr;
+    }
+
+
+    if (scaleB > 0.0)
+    {
+        result.relativeChangeCB =
+            result.deltaCB /
+            scaleB;
+    }
+
+
+    // ============================================================
+    // CONVERGENCE CRITERIA
+    // ============================================================
+
+    const double allowedAr =
+        absoluteTolerance +
+        relativeTolerance * scaleAr;
+
+
+    const double allowedB =
+        absoluteTolerance +
+        relativeTolerance * scaleB;
+
+
+    const bool arConverged =
+        result.deltaCAr <= allowedAr;
+
+
+    const bool bConverged =
+        result.deltaCB <= allowedB;
+
+
+    result.converged =
+        arConverged &&
+        bConverged;
+
+
+    // ============================================================
+    // UPDATE REFERENCE FOR NEXT CHECK
+    // ============================================================
+
+    state.previousAverageCAr =
+        averageCAr;
+
+    state.previousAverageCB =
+        averageCB;
+
+
+        std::cout
+        << "\nCube <cAr>    = "
+        << result.averageCAr
+        << " mol/m^3"
+
+        << "\nCube <cB>     = "
+        << result.averageCB
+        << " mol/m^3"
+
+        << "\nDelta <cAr>   = "
+        << result.deltaCAr 
+
+        << "\nDelta <cB>    = "
+        << result.deltaCB
+
+        << "\nRel change Ar = "
+        << result.relativeChangeCAr
+
+        << "\nRel change B  = "
+        << result.relativeChangeCB
+
+        << "\nConverged     = "
+        << std::boolalpha
+        << result.converged
+
+        << "\n------------------------------"
+        << std::endl;
+
+
+    if (result.converged)
+    {
+        std::cout
+            << "\n========================================"
+            << "\nSTEFAN-MAXWELL CONCENTRATIONS CONVERGED"
+            << "\n========================================"
+            << std::endl;
+    }
+
+    return result;
 }
